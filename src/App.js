@@ -40,6 +40,7 @@ import {
   FolderSync,
   ChartPie,
   Copy,
+  ClipboardPaste,
   BarChart3,
   AlertTriangle,
   ChevronRight,
@@ -195,6 +196,24 @@ const STATUS_CONFIG = {
     icon: <Clock className="w-4 h-4" />,
   },
 };
+const TESTWATCH_CLIPBOARD_PREFIX = "TESTWATCH_TESTS::";
+const encodeTestWatchClipboard = (payload) => {
+  const json = JSON.stringify(payload);
+  const encoded = window.btoa(unescape(encodeURIComponent(json)));
+  return `${TESTWATCH_CLIPBOARD_PREFIX}${encoded}`;
+};
+const decodeTestWatchClipboard = (text) => {
+  if (!text || typeof text !== "string") return null;
+  if (!text.startsWith(TESTWATCH_CLIPBOARD_PREFIX)) return null;
+  const data = text.slice(TESTWATCH_CLIPBOARD_PREFIX.length);
+  try {
+    const decoded = decodeURIComponent(escape(window.atob(data)));
+    return JSON.parse(decoded);
+  } catch (e) {
+    console.error("Failed to decode TestWatch clipboard:", e);
+    return null;
+  }
+};
 const copyToClipboard = (text) => {
   return new Promise((resolve, reject) => {
     const textarea = document.createElement("textarea");
@@ -205,7 +224,7 @@ const copyToClipboard = (text) => {
     textarea.style.opacity = "0";
     document.body.appendChild(textarea);
     textarea.select();
-    textarea.setSelectionRange(0, 99999);
+    textarea.setSelectionRange(0, textarea.value.length);
     try {
       document.execCommand("copy");
       document.body.removeChild(textarea);
@@ -350,35 +369,39 @@ const useFetch = (fetcher, deps = [], initial = null) => {
   }, [...deps, fetchData]);
   return { data, loading, setData, refetch: fetchData };
 };
+const ROOT_LABEL = "Без категории";
+const ITEMS_KEY = "__items__";
 const groupByHierarchy = (items, getEpic, getFeature, getStory) => {
-  const ROOT = "Без категории";
   return items.reduce((acc, item) => {
     const levels = [getEpic(item), getFeature(item), getStory(item)];
     let current = acc;
     let found = false;
     for (const level of levels) {
       if (level) {
+        const hasNextRealLevel = levels
+          .slice(levels.indexOf(level) + 1)
+          .some(Boolean);
         if (!current[level]) {
-          const hasNextRealLevel = levels
-            .slice(levels.indexOf(level) + 1)
-            .some(Boolean);
           current[level] = hasNextRealLevel ? {} : [];
+        } else if (hasNextRealLevel && Array.isArray(current[level])) {
+          const savedItems = current[level];
+          current[level] = { [ITEMS_KEY]: savedItems };
         }
         current = current[level];
         found = true;
       }
     }
     if (!found) {
-      if (!current[ROOT]) {
-        current[ROOT] = [];
+      if (!current[ROOT_LABEL]) {
+        current[ROOT_LABEL] = [];
       }
-      current[ROOT].push(item);
+      current[ROOT_LABEL].push(item);
     } else {
       if (Array.isArray(current)) {
         current.push(item);
       } else {
-        current[""] = current[""] || [];
-        current[""].push(item);
+        current[ITEMS_KEY] = current[ITEMS_KEY] || [];
+        current[ITEMS_KEY].push(item);
       }
     }
     return acc;
@@ -388,6 +411,7 @@ const collectAllGroupNodeIds = (node, nodeId = "") => {
   if (Array.isArray(node)) return [];
   let ids = [];
   Object.entries(node).forEach(([key, value]) => {
+    if (key === ITEMS_KEY) return;
     const childNodeId = nodeId ? `${nodeId}-${key}` : key;
     ids.push(childNodeId);
     ids = ids.concat(collectAllGroupNodeIds(value, childNodeId));
@@ -526,7 +550,13 @@ const Tree = React.memo(function Tree({
             return acc;
           }, {});
         } else {
+          const directItems = node[ITEMS_KEY] || [];
+          directItems.forEach((item) => {
+            const status = normalizeStatusKey(item.status);
+            counts[status] = (counts[status] || 0) + 1;
+          });
           Object.entries(node).forEach(([key, value]) => {
+            if (key === ITEMS_KEY) return;
             const childNodeId = nodeId ? `${nodeId}-${key}` : key;
             const childStats = calculateStats(value, childNodeId);
             Object.entries(childStats).forEach(([status, count]) => {
@@ -547,7 +577,10 @@ const Tree = React.memo(function Tree({
         if (Array.isArray(node)) {
           count = node.length;
         } else {
+          const directItems = node[ITEMS_KEY] || [];
+          count += directItems.length;
           Object.entries(node).forEach(([key, value]) => {
+            if (key === ITEMS_KEY) return;
             const childNodeId = nodeId ? `${nodeId}-${key}` : key;
             const childCount = calculateCounts(value, childNodeId);
             count += childCount;
@@ -562,6 +595,41 @@ const Tree = React.memo(function Tree({
     }
     return { grouped: groupedData, statusStats: stats, countStats: counts };
   }, [items, getEpic, getStory, getFeature, pageType, showStatusBar]);
+  useEffect(() => {
+    const flat = {};
+    const collect = (node) => {
+      if (!node) return;
+      if (Array.isArray(node)) {
+        node.forEach((item) => {
+          if (!item || typeof item !== "object") return;
+          const key =
+            item.number !== undefined && item.test_id
+              ? `${item.number}|${item.test_id}`
+              : null;
+          if (key) {
+            flat[key] = item;
+          }
+        });
+      } else if (typeof node === "object") {
+        if (Array.isArray(node[ITEMS_KEY])) collect(node[ITEMS_KEY]);
+        Object.entries(node).forEach(([k, v]) => {
+          if (k === ITEMS_KEY) return;
+          collect(v);
+        });
+      }
+    };
+    try {
+      collect(items);
+      window.__TW_NODE_MAP__ = flat;
+      window.dispatchEvent(
+        new CustomEvent("twNodeMapUpdated", {
+          detail: { count: Object.keys(flat).length || 0 },
+        })
+      );
+    } catch (e) {
+      console.error("Failed to build node map", e);
+    }
+  }, [items]);
   const isSelectedItem = useCallback(
     (item) => {
       if (!selected) return false;
@@ -635,7 +703,7 @@ const Tree = React.memo(function Tree({
     const id = `${item.number}|${item.test_id}`;
     const isSelected = isSelectedItem(item);
     const checked = checkedNodes.has(id);
-    const padding = level * 20 + 8;
+    const padding = level * 20;
     const statusBarClass = getStatusBarClass(item.status || "default");
     return (
       <div
@@ -704,7 +772,33 @@ const Tree = React.memo(function Tree({
         />
       ));
     }
-    return Object.entries(node).map(([key, value]) => {
+    const directItems = (node[ITEMS_KEY] || []).slice().sort((a, b) => {
+      const byName = (a.name || "").localeCompare(b.name || "", "ru-RU", {
+        sensitivity: "base",
+      });
+      if (byName !== 0) return byName;
+      return String(a.test_id || "").localeCompare(
+        String(b.test_id || ""),
+        "ru-RU",
+        { sensitivity: "base" }
+      );
+    });
+    const childrenEntries = Object.entries(node)
+      .filter(([key]) => key !== ITEMS_KEY)
+      .sort(([aKey], [bKey]) =>
+        String(aKey).localeCompare(String(bKey), "ru-RU", {
+          sensitivity: "base",
+        })
+      );
+    const directItemsRendered = directItems.map((item) => (
+      <LeafRow
+        key={`${item.number}|${item.test_id}`}
+        item={item}
+        level={level}
+        pageType={pageType}
+      />
+    ));
+    const childrenRendered = childrenEntries.map(([key, value]) => {
       const childNodeId = nodeId ? `${nodeId}-${key}` : key;
       const isExpanded = expandedNodes.has(childNodeId);
       const childIds = collectAllIds(value);
@@ -785,6 +879,12 @@ const Tree = React.memo(function Tree({
         </div>
       );
     });
+    return (
+      <>
+        {childrenRendered}
+        {directItemsRendered}
+      </>
+    );
   };
   return (() => {
     try {
@@ -1415,6 +1515,8 @@ const TestRunnerPanel = ({ testPlanId }) => {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isChangingStatus, setIsChangingStatus] = useState(false);
+  const [canPaste, setCanPaste] = useState(false);
+  const [isPasting, setIsPasting] = useState(false);
   const getCookie = (name) => {
     const match = document.cookie.match(
       new RegExp(
@@ -1529,6 +1631,122 @@ const TestRunnerPanel = ({ testPlanId }) => {
     const result = await window.preSync?.();
     if (result !== false) {
       window.triggerSync?.();
+    }
+  };
+  const buildSelectedTests = () => {
+    if (!window.actualCheckedNodes || window.actualCheckedNodes.size === 0) {
+      return [];
+    }
+    const map = window.__TW_NODE_MAP__ || {};
+    const collected = [];
+    for (const node of window.actualCheckedNodes) {
+      const [numPart, testId] = node.split("|");
+      const item = map[node] || {};
+      const parsedNumber = Number(numPart);
+      collected.push({
+        test_id: item.test_id || testId,
+        name: item.name ?? null,
+        epic: item.epic ?? null,
+        story: item.story ?? null,
+        feature: item.feature ?? null,
+        template: item.template ?? null,
+        tms_links: item.tms_links ?? null,
+        params_test: item.params_test ?? null,
+        tags: item.tags ?? null,
+        number: Number.isFinite(parsedNumber) ? parsedNumber : item.number ?? 0,
+      });
+    }
+    return collected.filter((t) => t.test_id);
+  };
+  const copyTestWatchFormat = () => {
+    const tests = buildSelectedTests();
+    if (tests.length === 0) {
+      setShowCopyOptions(false);
+      return;
+    }
+    const payload = {
+      version: 1,
+      source: "TestWatch",
+      copiedAt: new Date().toISOString(),
+      tests,
+    };
+    const encoded = encodeTestWatchClipboard(payload);
+    copyToClipboard(encoded)
+      .catch((err) => {
+        console.error("Failed to copy TestWatch format: ", err);
+      })
+      .finally(() => {
+        setShowCopyOptions(false);
+        window.clearCheckboxes?.();
+      });
+  };
+  const readClipboardForTestWatch = useCallback(async () => {
+    if (!navigator?.clipboard?.readText) return null;
+    try {
+      const text = await navigator.clipboard.readText();
+      return decodeTestWatchClipboard(text);
+    } catch (e) {
+      console.error("Clipboard read failed", e);
+      return null;
+    }
+  }, []);
+  const updatePasteAvailability = useCallback(async () => {
+    if (!testPlanId) {
+      setCanPaste(false);
+      return;
+    }
+    const data = await readClipboardForTestWatch();
+    setCanPaste(!!data?.tests?.length);
+  }, [readClipboardForTestWatch, testPlanId]);
+  useEffect(() => {
+    updatePasteAvailability();
+    const handler = () => updatePasteAvailability();
+    window.addEventListener("focus", handler);
+    window.addEventListener("twNodeMapUpdated", handler);
+    return () => {
+      window.removeEventListener("focus", handler);
+      window.removeEventListener("twNodeMapUpdated", handler);
+    };
+  }, [updatePasteAvailability]);
+  const handlePasteTests = async () => {
+    if (!testPlanId) {
+      alert("Вставка доступна только внутри тест-плана");
+      return;
+    }
+    setIsPasting(true);
+    try {
+      const data = await readClipboardForTestWatch();
+      if (!data?.tests?.length) {
+        alert("В буфере нет тестов в формате TestWatch");
+        setCanPaste(false);
+        return;
+      }
+      const tests = data.tests.filter((t) => t?.test_id);
+      if (tests.length === 0) {
+        alert("В буфере нет валидных тестов для вставки");
+        setCanPaste(false);
+        return;
+      }
+      const trResp = await fetchJson(`${API}/testplan/${testPlanId}/testrun`, {
+        method: "POST",
+      });
+      const body = tests.map((t) => ({
+        test: { test_id: t.test_id },
+        status: "waiting",
+        number: `${Number.isFinite(Number(t.number)) ? Number(t.number) : 0}`,
+      }));
+      await fetchJson(`${API}/testrun/${trResp.test_run_id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      await navigator.clipboard.writeText('');
+      updatePasteAvailability();
+    } catch (e) {
+      console.error("Не удалось вставить тесты:", e);
+      alert("Не удалось вставить тесты из буфера. См. консоль.");
+    } finally {
+      setIsPasting(false);
     }
   };
   const copyMavenFormat = () => {
@@ -1724,9 +1942,31 @@ const TestRunnerPanel = ({ testPlanId }) => {
                   >
                     Maven
                   </button>
+                  <button
+                    className="block w-full text-left px-3 py-2 text-xs hover:bg-gray-100"
+                    onClick={copyTestWatchFormat}
+                  >
+                    TestWatch
+                  </button>
                 </div>
               )}
             </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 rounded-md text-gray-700 transition-all hover:bg-gray-100 hover:text-gray-800 focus-visible:ring-2 focus-visible:ring-gray-300"
+              title={
+                testPlanId
+                  ? "Вставить тесты"
+                  : "Вставка доступна в тест-плане"
+              }
+              disabled={!testPlanId || !canPaste || isPasting}
+              onMouseEnter={updatePasteAvailability}
+              onFocus={updatePasteAvailability}
+              onClick={handlePasteTests}
+            >
+              <ClipboardPaste className="h-4 w-4" />
+            </Button>
             {testPlanId && (
               <>
                 <Button
@@ -5024,7 +5264,7 @@ function InnerApp() {
             : "bg-red-100 text-red-800"
         }`}
       >
-        {wsConnected ? "🟢 v1.4" : "🔴 v1.4"}
+        {wsConnected ? "🟢 v1.5" : "🔴 v1.5"}
         <PepeEasterEgg />
       </div>
     </div>
