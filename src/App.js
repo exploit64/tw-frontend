@@ -105,7 +105,7 @@ import {
   PaginationNext,
 } from "./components/ui/pagination";
 import PepeEasterEgg from "./PepeEasterEgg";
-import Swal from "sweetalert2";
+import Swal from './Swal';
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   if (event.data.type !== "SWAL") return;
@@ -196,24 +196,7 @@ const STATUS_CONFIG = {
     icon: <Clock className="w-4 h-4" />,
   },
 };
-const TESTWATCH_CLIPBOARD_PREFIX = "TESTWATCH_TESTS::";
-const encodeTestWatchClipboard = (payload) => {
-  const json = JSON.stringify(payload);
-  const encoded = window.btoa(unescape(encodeURIComponent(json)));
-  return `${TESTWATCH_CLIPBOARD_PREFIX}${encoded}`;
-};
-const decodeTestWatchClipboard = (text) => {
-  if (!text || typeof text !== "string") return null;
-  if (!text.startsWith(TESTWATCH_CLIPBOARD_PREFIX)) return null;
-  const data = text.slice(TESTWATCH_CLIPBOARD_PREFIX.length);
-  try {
-    const decoded = decodeURIComponent(escape(window.atob(data)));
-    return JSON.parse(decoded);
-  } catch (e) {
-    console.error("Failed to decode TestWatch clipboard:", e);
-    return null;
-  }
-};
+const COPIED_TESTS_KEY = "tw_copied_tests";
 const copyToClipboard = (text) => {
   return new Promise((resolve, reject) => {
     const textarea = document.createElement("textarea");
@@ -1515,7 +1498,8 @@ const TestRunnerPanel = ({ testPlanId }) => {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isChangingStatus, setIsChangingStatus] = useState(false);
-  const [canPaste, setCanPaste] = useState(false);
+  const [canPaste, setCanPaste] = useState(true);
+  const [copiedTests, setCopiedTests] = useState([]);
   const [isPasting, setIsPasting] = useState(false);
   const getCookie = (name) => {
     const match = document.cookie.match(
@@ -1645,14 +1629,6 @@ const TestRunnerPanel = ({ testPlanId }) => {
       const parsedNumber = Number(numPart);
       collected.push({
         test_id: item.test_id || testId,
-        name: item.name ?? null,
-        epic: item.epic ?? null,
-        story: item.story ?? null,
-        feature: item.feature ?? null,
-        template: item.template ?? null,
-        tms_links: item.tms_links ?? null,
-        params_test: item.params_test ?? null,
-        tags: item.tags ?? null,
         number: Number.isFinite(parsedNumber) ? parsedNumber : item.number ?? 0,
       });
     }
@@ -1664,50 +1640,33 @@ const TestRunnerPanel = ({ testPlanId }) => {
       setShowCopyOptions(false);
       return;
     }
-    const payload = {
-      version: 1,
-      source: "TestWatch",
-      copiedAt: new Date().toISOString(),
-      tests,
-    };
-    const encoded = encodeTestWatchClipboard(payload);
-    copyToClipboard(encoded)
-      .catch((err) => {
-        console.error("Failed to copy TestWatch format: ", err);
-      })
-      .finally(() => {
-        setShowCopyOptions(false);
-        window.clearCheckboxes?.();
-      });
-  };
-  const readClipboardForTestWatch = useCallback(async () => {
-    if (!navigator?.clipboard?.readText) return null;
+    setCopiedTests(tests);
     try {
-      const text = await navigator.clipboard.readText();
-      return decodeTestWatchClipboard(text);
+      localStorage.setItem(COPIED_TESTS_KEY, JSON.stringify(tests));
     } catch (e) {
-      console.error("Clipboard read failed", e);
-      return null;
+      console.error("Failed to persist copied tests", e);
+    }
+    setCanPaste(true);
+    setShowCopyOptions(false);
+    window.clearCheckboxes?.();
+  };
+  useEffect(() => {
+
+    try {
+      const raw = localStorage.getItem(COPIED_TESTS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setCopiedTests(parsed);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load copied tests", e);
     }
   }, []);
-  const updatePasteAvailability = useCallback(async () => {
-    if (!testPlanId) {
-      setCanPaste(false);
-      return;
-    }
-    const data = await readClipboardForTestWatch();
-    setCanPaste(!!data?.tests?.length);
-  }, [readClipboardForTestWatch, testPlanId]);
   useEffect(() => {
-    updatePasteAvailability();
-    const handler = () => updatePasteAvailability();
-    window.addEventListener("focus", handler);
-    window.addEventListener("twNodeMapUpdated", handler);
-    return () => {
-      window.removeEventListener("focus", handler);
-      window.removeEventListener("twNodeMapUpdated", handler);
-    };
-  }, [updatePasteAvailability]);
+    setCanPaste(!!(testPlanId && copiedTests.length));
+  }, [testPlanId, copiedTests]);
   const handlePasteTests = async () => {
     if (!testPlanId) {
       alert("Вставка доступна только внутри тест-плана");
@@ -1715,17 +1674,19 @@ const TestRunnerPanel = ({ testPlanId }) => {
     }
     setIsPasting(true);
     try {
-      const data = await readClipboardForTestWatch();
-      if (!data?.tests?.length) {
-        alert("В буфере нет тестов в формате TestWatch");
-        setCanPaste(false);
+      if (!copiedTests.length) {
+        alert("Нет скопированных тестов для вставки");
         return;
       }
-      const tests = data.tests.filter((t) => t?.test_id);
+      const tests = copiedTests.filter((t) => t?.test_id);
       if (tests.length === 0) {
-        alert("В буфере нет валидных тестов для вставки");
-        setCanPaste(false);
+        alert("Нет валидных тестов для вставки");
         return;
+      }
+      try {
+        localStorage.setItem(COPIED_TESTS_KEY, JSON.stringify(tests));
+      } catch (e) {
+        console.error("Failed to refresh persisted copied tests", e);
       }
       const trResp = await fetchJson(`${API}/testplan/${testPlanId}/testrun`, {
         method: "POST",
@@ -1740,11 +1701,12 @@ const TestRunnerPanel = ({ testPlanId }) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      await navigator.clipboard.writeText('');
-      updatePasteAvailability();
+
+      localStorage.removeItem(COPIED_TESTS_KEY);
+      setCopiedTests([]);
     } catch (e) {
       console.error("Не удалось вставить тесты:", e);
-      alert("Не удалось вставить тесты из буфера. См. консоль.");
+      alert("Не удалось вставить тесты. См. консоль.");
     } finally {
       setIsPasting(false);
     }
@@ -1951,22 +1913,18 @@ const TestRunnerPanel = ({ testPlanId }) => {
                 </div>
               )}
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 rounded-md text-gray-700 transition-all hover:bg-gray-100 hover:text-gray-800 focus-visible:ring-2 focus-visible:ring-gray-300"
-              title={
-                testPlanId
-                  ? "Вставить тесты"
-                  : "Вставка доступна в тест-плане"
-              }
-              disabled={!testPlanId || !canPaste || isPasting}
-              onMouseEnter={updatePasteAvailability}
-              onFocus={updatePasteAvailability}
-              onClick={handlePasteTests}
-            >
-              <ClipboardPaste className="h-4 w-4" />
-            </Button>
+            {testPlanId && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-md text-gray-700 transition-all hover:bg-gray-100 hover:text-gray-800 focus-visible:ring-2 focus-visible:ring-gray-300"
+                title="Вставить тесты"
+                disabled={!canPaste || isPasting}
+                onClick={handlePasteTests}
+              >
+                <ClipboardPaste className="h-4 w-4" />
+              </Button>
+            )}
             {testPlanId && (
               <>
                 <Button
@@ -5264,7 +5222,7 @@ function InnerApp() {
             : "bg-red-100 text-red-800"
         }`}
       >
-        {wsConnected ? "🟢 v1.5" : "🔴 v1.5"}
+        {wsConnected ? "🟢 v1.6" : "🔴 v1.6"}
         <PepeEasterEgg />
       </div>
     </div>
@@ -5274,6 +5232,7 @@ function App() {
   return (
     <BrowserRouter>
       <InnerApp />
+      <Swal.Modal />
     </BrowserRouter>
   );
 }
