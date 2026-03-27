@@ -143,7 +143,7 @@ function MultiStatusSelect({ value, onChange, testResults = [] }) {
 }
 
 export const TestRunsPage = () => {
-  const { planId, runId } = useParams(); // ← УБРАЛ testUuid, как в старом коде
+  const { planId, runId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
   const [testPlans, setTestPlans] = useState([]);
@@ -272,7 +272,6 @@ export const TestRunsPage = () => {
 
   const [selectedResult, setSelectedResult] = useState(null);
 
-  // ← ВОССТАНОВЛЕН: эффект для чтения хеша при загрузке (как в старом коде)
   const lastProcessedHashRef = useRef(null);
   useEffect(() => {
     lastProcessedHashRef.current = null;
@@ -280,7 +279,7 @@ export const TestRunsPage = () => {
 
   useEffect(() => {
     if (!planDetails) return;
-    const hashUuid = (location.hash || "").replace(/^#/, ""); // ← ТОЛЬКО hash, без testUuid!
+    const hashUuid = (location.hash || "").replace(/^#/, "");
     if (!hashUuid || hashUuid === lastProcessedHashRef.current) return;
     lastProcessedHashRef.current = hashUuid;
 
@@ -306,9 +305,8 @@ export const TestRunsPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [location.hash, planDetails]); // ← НЕТ testUuid в зависимостях!
+  }, [location.hash, planDetails]);
 
-  // ← ВОССТАНОВЛЕН: рабочий обработчик hashchange (как в старом коде)
   useEffect(() => {
     const onHashChange = () => {
       const hashUuid = (window.location.hash || "").replace(/^#/, "");
