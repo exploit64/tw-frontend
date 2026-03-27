@@ -3,7 +3,7 @@ code {
 }
 
 [hidden] {
-    @apply hidden; 
+    @apply hidden;
 }
 
 .code-stacktrace::-webkit-scrollbar {
